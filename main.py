@@ -8,9 +8,8 @@ from typing import cast
 from src.asb_mds import asb_py, asb_r
 from src.cnes import cnes_py
 from src.schools import compile_schools, process_schools
-from src.h3_cells import get_h3_cells 
+from src.adm_regions import get_adm_regions, LEVELS
 from src.prep_index import prep_index
-from src.analysis import analysis
 
 tmp_path = r"D:/ARQUIVOS_TEMPORARIOS/pedro.maia" 
 if os.path.exists(tmp_path):
@@ -38,7 +37,6 @@ with suppress_stderr():
 
 raw_data = os.path.join(os.getcwd(),'data','raw')
 clean_data = os.path.join(os.getcwd(),'data','clean')
-output_data = os.path.join(os.getcwd(),'output')
 
 ##################
 # prep functions #
@@ -82,9 +80,9 @@ def school_prep(raw_data:str, clean_data:str):
 # executing the code #
 ######################
     
-def main(res:int):
-    # This only needs to be done once, so we do it for the first resolution (0)
-    if res == 0:
+def main(level:str, preprocess:bool=False):
+    # The amenity inputs are shared by all geographic levels.
+    if preprocess:
         # georef data
         print('')
         print('\nPreprocessing the data...', end='', flush=True)
@@ -96,28 +94,21 @@ def main(res:int):
             school_prep(raw_data,clean_data) 
         print('\nPreprocessing the data... Done!     ')
     
-    # These operations need to be done for each resolution, so we do them for all resolutions (0-8)
-    
-    # h3 cells
+    # Administrative polygons and their 2022 population
     print('')
-    print('\nGenerating habitated H3 cells...', end='', flush=True)
-    if not os.path.exists(os.path.join(clean_data,'h3',f'h3_clean_{res}.parquet')):
-        get_h3_cells(raw_data,clean_data, res)
-    print('Generating habitated H3 cells... Done!     ')
+    print(f'\nPreparing {level} polygons...', end='', flush=True)
+    if not os.path.exists(os.path.join(clean_data,'adm_regions',f'{level}.parquet')):
+        get_adm_regions(raw_data,clean_data,level)
+    print(f'Preparing {level} polygons... Done!     ')
         
     # pca analysis
     print('')
     print('\nPrepping data for PCA analysis ...', end='', flush=True)
-    if not os.path.exists(os.path.join(clean_data,'accessibility',f'access_panel_idx_{res}.parquet')):
-        prep_index(raw_data,clean_data, res)
+    if not os.path.exists(os.path.join(clean_data,'accessibility',f'access_panel_idx_{level}.parquet')):
+        prep_index(raw_data,clean_data, level)
     print('\nPrepping data for PCA analysis ... Done!     ')
-    if res==8:
-        print('')
-        print('\nPCA analysis...', end='', flush=True)
-        analysis(clean_data,output_data, res)
-        print('\nPCA analysis... Done!   ')
     
 if __name__ == "__main__":
-    for i in range(0,9):
-        print(f'\n\nRunning the code for H3 resolution {i} ...', end='', flush=True)
-        main(res=i)
+    for i, level in enumerate(LEVELS):
+        print(f'\n\nRunning the code for {level} ...', end='', flush=True)
+        main(level, preprocess=(i == 0))

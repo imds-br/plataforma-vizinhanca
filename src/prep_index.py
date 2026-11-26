@@ -1,12 +1,9 @@
 import pandas as pd
 import geopandas as gpd
 from src import accessibility as mine
-import geobr, tqdm, os
+import tqdm, os
 from sklearn import preprocessing
 from sklearn.decomposition import PCA
-from src.h3_cells import MUNICIPALITY_YEAR
-from src.locations import located_points
-from src.rais_activity import active_establishments
 
 def sjoin_largest_overlap(left_gdf, right_gdf, right_cols, id_col="cell", area_crs=None, keep_unmatched=True):
     """
@@ -125,90 +122,57 @@ def sjoin_largest_overlap(left_gdf, right_gdf, right_cols, id_col="cell", area_c
 
     return best_match
 
-def assign_municipalities(h3_cells):
-    """Assign every cell using the same boundary vintage as grid generation."""
-    brazil = geobr.read_municipality(year=MUNICIPALITY_YEAR).to_crs(h3_cells.crs)
-    matched = sjoin_largest_overlap(
-        h3_cells, brazil, right_cols=['code_muni', 'abbrev_state'],
-        id_col='cell', area_crs='EPSG:5880',
-    )
-    missing = matched[['code_muni', 'abbrev_state']].isna().any(axis=1)
-    if missing.any():
-        examples = matched.loc[missing, 'cell'].head(10).tolist()
-        raise ValueError(
-            f'{missing.sum()} cells have no municipality match against {MUNICIPALITY_YEAR} '
-            f'boundaries; check the grid vintage before calculating accessibility. Examples: {examples}'
-        )
-    return matched
-
-
-def prep_index(raw_path:str, clean_path:str, res:int=8):
+def prep_index(raw_path:str, clean_path:str, level:str):
     # base imports
-    print('Importing h3 data...')
-    h3_cells = gpd.read_parquet(
-        os.path.join(clean_path,'h3',f'h3_clean_{res}.parquet'), filters=[('pop', '>', 0)],
-    )
-    if h3_cells.empty:
-        raise ValueError('No H3 cells have positive allocated population')
-    muni_match = assign_municipalities(h3_cells)
-    h3_raw = gpd.read_parquet(os.path.join(raw_path,'h3',f'h3_cells_{res}.parquet'))
+    print(f'Importing {level} polygons...')
+    units = gpd.read_parquet(os.path.join(clean_path,'adm_regions',f'{level}.parquet'))
+    unit_geometries = units[['unit_id', 'geometry']]
     
     print('Importing infrastructure data...')
     schools = gpd.read_parquet(os.path.join(clean_path,'schools','schools-shape.parquet'))
     cnes = gpd.read_parquet(os.path.join(clean_path,'CNES','cnes_panel.parquet'))
     asb = gpd.read_parquet(os.path.join(clean_path,'ASB','asb-clean.parquet'))
     
-    schools = schools.sjoin(h3_raw[['cell','geometry']], how='left', predicate='intersects')
-    cnes = cnes.sjoin(h3_raw[['cell','geometry']], how='left', predicate='intersects')
-    asb = asb.sjoin(h3_raw[['cell','geometry']], how='left', predicate='intersects')
-    
     for year in tqdm.tqdm(range(2008,2023),desc='Years'):
         schools_base = schools[schools[f'y_{year}']>0].copy()
         cnes_base = cnes[cnes[f'year_{str(year-2000).zfill(2)}']==1].copy()
         asb_base = asb[asb[f'y_{year-2000}']==1].copy()
         varlist = [schools_base,cnes_base,asb_base]
-        names =  ['schools','cnes','asb']
         if (year>=2012) & (year<=2019):
             rais = pd.read_parquet(os.path.join(clean_path,'RAIS',f'rais_firm_charact_geocoded_{year}.parquet'))
-            rais = active_establishments(rais, f'RAIS {year}')
             rais = gpd.GeoDataFrame(rais, geometry = gpd.points_from_xy(rais.lon, rais.lat), crs='EPSG:4326')
             rais = rais.to_crs('epsg:4674')
             varlist.append(rais)
-            names.append('jobs')
                     
         accessibility_br = []            
-        for name, var in zip(names, varlist):
-            located = located_points(var, f'{name} {year}')
-            if located.empty:
-                raise ValueError(f'{name} {year}: no active facility locations')
-            gdf_br = mine.accessibility_chunked(h3_cells.drop(columns=['pop']),located,1000) # accessibility_chunked
+        for var in varlist:
+            gdf_br = mine.accessibility_chunked(unit_geometries,var[var.geometry.is_valid & ~var.geometry.is_empty],1000)
             accessibility_br.append(gdf_br)
         if year == 2008: # first year copy as base df
             ydata = accessibility_br[0].rename(columns={'accessibility':f'schools_{year-2000}'}).copy()
         else:
-            ydata = ydata.merge(accessibility_br[0][['cell','accessibility']],on='cell').rename(columns={'accessibility':f'schools_{year-2000}'})
-        ydata = ydata.merge(accessibility_br[1][['cell','accessibility']],on='cell').rename(columns={'accessibility':f'cnes_{year-2000}'})
-        ydata = ydata.merge(accessibility_br[2][['cell','accessibility']],on='cell').rename(columns={'accessibility':f'asb_{year-2000}'})
+            ydata = ydata.merge(accessibility_br[0][['unit_id','accessibility']],on='unit_id').rename(columns={'accessibility':f'schools_{year-2000}'})
+        ydata = ydata.merge(accessibility_br[1][['unit_id','accessibility']],on='unit_id').rename(columns={'accessibility':f'cnes_{year-2000}'})
+        ydata = ydata.merge(accessibility_br[2][['unit_id','accessibility']],on='unit_id').rename(columns={'accessibility':f'asb_{year-2000}'})
         if (year>=2012) & (year<=2019):
-            ydata = ydata.merge(accessibility_br[3][['cell','accessibility']],on='cell').rename(columns={'accessibility':f'jobs_{year-2000}'})
+            ydata = ydata.merge(accessibility_br[3][['unit_id','accessibility']],on='unit_id').rename(columns={'accessibility':f'jobs_{year-2000}'})
         del accessibility_br
         
     # reshaping data
     drop_cols = ['geometry']
-    pop = h3_cells[['cell', 'pop']]
-    panel_data = ydata.loc[:,~ydata.columns.str.contains('code_')].drop(columns=drop_cols).melt('cell', var_name='var_ny', value_name='Val').copy()
+    panel_data = ydata.drop(columns=drop_cols).melt('unit_id', var_name='var_ny', value_name='Val').copy()
     panel_data['var_name']=panel_data.var_ny.str.split('_').str[0]
     panel_data['var_year']=panel_data.var_ny.str.split('_').str[1]
     panel_data = panel_data[~panel_data.var_year.isin(['s','23'])]
-    panel_data = panel_data.pivot(columns='var_name', values='Val', index=['cell','var_year']).reset_index().copy()
+    panel_data = panel_data.pivot(columns='var_name', values='Val', index=['unit_id','var_year']).reset_index().copy()
 
     # adding geo info back
-    panel_data = panel_data.merge(ydata[['cell'] + drop_cols], on='cell',how='left')  
+    panel_data = panel_data.merge(ydata[['unit_id'] + drop_cols], on='unit_id',how='left')
     panel_data = gpd.GeoDataFrame(panel_data)
     del ydata
 
     #add pop back to the data
-    panel_data = panel_data.merge(pop, on='cell', how='left')
+    panel_data = panel_data.merge(units[['unit_id', 'pop']], on='unit_id', how='left')
 
     # export for regressions        
     panel_data['var_year'] = panel_data['var_year'].astype(float)
@@ -241,16 +205,18 @@ def prep_index(raw_path:str, clean_path:str, res:int=8):
         panel_data_idx.loc[:,'ipse'+scaler_header] = scaler_idx.fit_transform(-panel_data_idx['ipse'+scaler_header].values.reshape(-1,1)).copy() # 0-1 scale through quantiles
     
     # export final data w/ index calculated and other variables for analysis
-    panel_data_idx = panel_data.merge(panel_data_idx[['cell','var_year','ipse_z','ipse_t']], on=['cell','var_year'], how='left')
+    panel_data_idx = panel_data.merge(panel_data_idx[['unit_id','var_year','ipse_z','ipse_t']], on=['unit_id','var_year'], how='left')
     del panel_data
     
     # scaling variables for FIB (variáveis como índice)
     for var in ['cnes','asb','schools','jobs']:
         panel_data_idx.loc[:,var+'_idx'] = scaler_idx.fit_transform(-panel_data_idx[var].values.reshape(-1,1)).copy()
         
-    # adding code_muni and abbrev_state to panel_data_idx 
-    panel_data_idx = panel_data_idx.merge(muni_match, on='cell', how='left', validate='many_to_one')
+    # retain the geobr identifiers and names for each administrative unit
+    unit_attributes = units.drop(columns=['geometry', 'pop'])
+    panel_data_idx = panel_data_idx.merge(unit_attributes, on='unit_id', how='left')
+    panel_data_idx['level'] = level
     
     # exporting
-    gpd.GeoDataFrame(panel_data_idx).to_parquet(os.path.join(clean_path,'accessibility',f'access_panel_idx_{res}.parquet'), index=False)
-    
+    os.makedirs(os.path.join(clean_path, 'accessibility'), exist_ok=True)
+    gpd.GeoDataFrame(panel_data_idx).to_parquet(os.path.join(clean_path,'accessibility',f'access_panel_idx_{level}.parquet'), index=False)

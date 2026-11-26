@@ -114,7 +114,7 @@ def asb_r(clean_path:str):
     asb.geometry = gpd.points_from_xy(
         asb.longitude, asb.latitude, crs="EPSG:4674"
     )
-    
+
     # formatting data
     asb = asb[['NU_IDENTIFICADOR','data','geometry']]
     asb['year'] = asb['data'].str[-4:].astype(int)

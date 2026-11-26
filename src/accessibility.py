@@ -103,7 +103,29 @@ def accessibility(gdf:gpd.GeoDataFrame, reference_shapes:gpd.GeoDataFrame, spaci
     return result
 
 def process_polygon(geom, tree, spacing_m):
-    return minimum_distance(tree, generate_grid(geom, spacing_m))
+    # Keep the same grid origins and mean-distance definition as generate_grid,
+    # but avoid materializing an entire state or macroregion grid at once.
+    minx, miny, maxx, maxy = geom.bounds
+    x = np.arange(minx, maxx, spacing_m)
+    y = np.arange(miny, maxy, spacing_m)
+    if len(x) == 0 or len(y) == 0:
+        return minimum_distance(tree, np.array([[geom.centroid.x, geom.centroid.y]]))
+
+    rows_per_batch = max(1, 100_000 // len(x))
+    distance_sum = 0.0
+    point_count = 0
+    for start in range(0, len(y), rows_per_batch):
+        xx, yy = np.meshgrid(x, y[start:start + rows_per_batch])
+        coords = np.column_stack((xx.ravel(), yy.ravel()))
+        coords = coords[shp.contains(geom, shp.points(coords))]
+        if len(coords):
+            distances, _ = tree.query(coords)
+            distance_sum += distances.sum()
+            point_count += len(coords)
+
+    if point_count == 0:
+        return minimum_distance(tree, np.array([[geom.centroid.x, geom.centroid.y]]))
+    return distance_sum / point_count / 1000.0
 
 def accessibility_chunked(gdf:gpd.GeoDataFrame, reference_shapes:gpd.GeoDataFrame, spacing_m:int, n_jobs:int|None=None) -> gpd.GeoDataFrame:
     # Number of cores
